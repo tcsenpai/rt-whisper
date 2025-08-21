@@ -20,7 +20,7 @@ import torch
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Changed to DEBUG for troubleshooting
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class TranscriptionServer:
         self.buffer_duration = buffer_duration
         self.silence_duration = silence_duration
         self.frame_duration_ms = 30  # VAD frame duration in milliseconds
-        self.frame_size = int(sample_rate * frame_duration_ms / 1000)
+        self.frame_size = int(sample_rate * self.frame_duration_ms / 1000)
         
         # Check CUDA availability
         if device == "cuda" and not torch.cuda.is_available():
@@ -148,6 +148,9 @@ class TranscriptionServer:
             # Assume audio is in 16-bit PCM format
             audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
             
+            # Debug: Log audio chunk info
+            logger.debug(f"Received audio chunk: {len(audio_data)} bytes, {len(audio_array)} samples, max amplitude: {np.max(np.abs(audio_array)):.4f}")
+            
             # Add to buffer
             client["audio_buffer"].extend(audio_array)
             
@@ -165,6 +168,8 @@ class TranscriptionServer:
                 is_speech = self.vad.is_speech(frame_int16.tobytes(), self.sample_rate)
                 
                 if is_speech:
+                    if not client["is_speaking"]:
+                        logger.info(f"Speech detected for {client_id}")
                     client["last_speech_time"] = time.time()
                     client["is_speaking"] = True
                     # Add frame to transcription buffer
@@ -174,6 +179,7 @@ class TranscriptionServer:
                     silence_time = time.time() - client["last_speech_time"]
                     
                     if client["is_speaking"] and silence_time > self.silence_duration:
+                        logger.info(f"Silence detected for {client_id}, triggering transcription. Buffer size: {len(client['transcription_buffer'])} samples")
                         # Process buffered audio
                         await self.transcribe_buffer(client_id)
                         client["is_speaking"] = False

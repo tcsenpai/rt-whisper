@@ -1,3 +1,7 @@
+refs/
+models/
+cache/
+.locks/
 __pycache__
 *.pyc
 *.pyz
