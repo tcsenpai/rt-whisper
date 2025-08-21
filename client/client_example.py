@@ -271,8 +271,15 @@ class StreamingClient:
         # Request sample rate negotiation (response handled in receive_transcriptions)
         await self.request_sample_rate_negotiation(websocket)
         
-        # Wait briefly for negotiation to complete
-        await asyncio.sleep(0.5)
+        # Wait for negotiation to complete
+        timeout = 10
+        while self.awaiting_negotiation and timeout > 0:
+            await asyncio.sleep(0.1)
+            timeout -= 1
+            
+        if self.awaiting_negotiation:
+            print("⚠️  Sample rate negotiation timed out, using 16 kHz")
+            self.negotiated_sample_rate = 16000
         
         # Setup resampling if needed
         target_rate = self.negotiated_sample_rate or 16000
@@ -310,6 +317,8 @@ class StreamingClient:
                     await websocket.send(audio_data)
                     
                 except queue.Empty:
+                    # Continue running even if no audio data
+                    await asyncio.sleep(0.01)  # Prevent tight loop
                     continue
                 except websockets.exceptions.ConnectionClosed:
                     print("Connection to server lost")
@@ -422,15 +431,21 @@ class StreamingClient:
                 print("Speak into your microphone. Press Ctrl+C to stop.")
                 print("=" * 50)
                 
-                # Create tasks for sending and receiving
-                send_task = asyncio.create_task(self.send_audio(websocket))
+                # Start receive task first to handle negotiation
                 receive_task = asyncio.create_task(self.receive_transcriptions(websocket))
                 command_task = asyncio.create_task(self.handle_commands(websocket))
                 
-                # Wait for any task to complete
+                # Wait a bit for tasks to start
+                await asyncio.sleep(0.1)
+                
+                # Start audio streaming after other tasks are running
+                send_task = asyncio.create_task(self.send_audio(websocket))
+                
+                # Wait for any task to complete (but not immediately)
                 done, pending = await asyncio.wait(
                     [send_task, receive_task, command_task],
-                    return_when=asyncio.FIRST_COMPLETED
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=None
                 )
                 
                 # Cancel remaining tasks
