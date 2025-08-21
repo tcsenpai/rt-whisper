@@ -12,6 +12,7 @@ import threading
 import queue
 import argparse
 import sys
+import time
 from typing import Optional
 from scipy import signal
 
@@ -44,6 +45,13 @@ class StreamingClient:
         self.actual_sample_rate = sample_rate  # Will be updated based on device capabilities
         self.target_sample_rate = 16000  # Server expects this
         self.resample_needed = False
+        
+        # Adaptive noise gating
+        self.noise_calibration = True
+        self.noise_samples = []
+        self.noise_floor = 0.01  # Default
+        self.calibration_start_time = None
+        self.calibration_duration = 3.0  # Seconds
         
         # Find and display available audio devices
         self.list_audio_devices()
@@ -157,23 +165,70 @@ class StreamingClient:
         resampled_int16 = resampled.astype(np.int16)
         return resampled_int16.tobytes()
     
+    def update_noise_floor(self, audio_array):
+        """Update adaptive noise floor during calibration"""
+        if not self.noise_calibration:
+            return
+            
+        if self.calibration_start_time is None:
+            self.calibration_start_time = time.time()
+            print(f"\n🔊 Calibrating noise floor... Please stay quiet for {self.calibration_duration} seconds.")
+            
+        elapsed = time.time() - self.calibration_start_time
+        if elapsed >= self.calibration_duration:
+            # Calculate adaptive noise floor
+            if self.noise_samples:
+                noise_levels = np.array(self.noise_samples)
+                self.noise_floor = np.percentile(noise_levels, 95) * 1.5  # 95th percentile + margin
+                print(f"\n✅ Noise calibration complete! Noise floor: {self.noise_floor:.4f}")
+                print("You can now speak normally - only audio above noise floor will be sent.")
+            else:
+                print("\n⚠️  No noise samples collected, using default threshold")
+                
+            self.noise_calibration = False
+            self.noise_samples = []
+        else:
+            # Collect noise samples
+            max_amp = np.max(np.abs(audio_array.astype(np.float32) / 32768.0))
+            self.noise_samples.append(max_amp)
+            
+            # Show progress
+            remaining = self.calibration_duration - elapsed
+            if int(elapsed * 2) != int((elapsed - 0.05) * 2):  # Update twice per second
+                print(f"\rCalibrating... {remaining:.1f}s remaining (level: {max_amp:.4f})", end="", flush=True)
+
+    def should_send_audio(self, audio_array):
+        """Check if audio should be sent based on noise gate"""
+        if self.noise_calibration:
+            return False  # Don't send during calibration
+            
+        max_amp = np.max(np.abs(audio_array.astype(np.float32) / 32768.0))
+        return max_amp > self.noise_floor
+
     def audio_callback(self, in_data, frame_count, time_info, status):
         """Callback for audio stream"""
         if status:
             print(f"Audio callback status: {status}")
         
-        # Debug: Check if we're getting actual audio
+        # Convert to numpy for processing
         audio_array = np.frombuffer(in_data, dtype=np.int16)
+        
+        # Update noise floor during calibration
+        self.update_noise_floor(audio_array)
+        
+        # Show audio levels during calibration or when above threshold
         max_amp = np.max(np.abs(audio_array))
-        if max_amp > 100:  # Only show if there's actual sound
+        if self.noise_calibration or max_amp > (self.noise_floor * 32768 * 0.8):
             bars = min(50, int(max_amp/500))
-            print(f"\rAudio level: {'█' * bars}{' ' * (50-bars)} [{max_amp:5d}]", end="", flush=True)
+            threshold_marker = int((self.noise_floor * 32768) / 500) if not self.noise_calibration else 0
+            bar_display = '█' * bars + '│' if bars > threshold_marker else '█' * bars
+            print(f"\rAudio: {bar_display}{' ' * (50-bars)} [{max_amp:5d}] {'(calibrating)' if self.noise_calibration else ''}", end="", flush=True)
         
-        # Resample if needed
-        processed_data = self.resample_audio(in_data)
-        
-        # Add audio data to queue
-        self.audio_queue.put(processed_data)
+        # Only queue audio if it should be sent
+        if self.should_send_audio(audio_array):
+            # Resample if needed
+            processed_data = self.resample_audio(in_data)
+            self.audio_queue.put(processed_data)
         
         return (in_data, pyaudio.paContinue if self.running else pyaudio.paComplete)
     

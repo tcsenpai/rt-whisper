@@ -31,10 +31,10 @@ class TranscriptionServer:
         model_size: str = "large-v3",
         device: str = "cuda",
         compute_type: str = "float16",
-        vad_aggressiveness: int = 2,
+        vad_aggressiveness: int = 1,  # Less aggressive for noisy environments
         sample_rate: int = 16000,
         buffer_duration: float = 0.5,  # Buffer duration in seconds
-        silence_duration: float = 0.5,  # Silence duration to trigger transcription
+        silence_duration: float = 1.0,  # Silence duration to trigger transcription
     ):
         """
         Initialize the transcription server
@@ -71,7 +71,8 @@ class TranscriptionServer:
             download_root="./models"
         )
         
-        # Initialize VAD
+        # Initialize VAD with less aggressive setting for noisy environments
+        logger.info(f"Setting VAD aggressiveness to {vad_aggressiveness} (0=least aggressive, 3=most aggressive)")
         self.vad = webrtcvad.Vad(vad_aggressiveness)
         
         # Client connections
@@ -151,7 +152,7 @@ class TranscriptionServer:
             # Debug: Log audio chunk info
             logger.debug(f"Received audio chunk: {len(audio_data)} bytes, {len(audio_array)} samples, max amplitude: {np.max(np.abs(audio_array)):.4f}")
             
-            # Add to buffer
+            # Add to buffer (client has already done noise gating)
             client["audio_buffer"].extend(audio_array)
             
             # Check if we have enough audio for VAD
@@ -164,16 +165,23 @@ class TranscriptionServer:
                 # Convert back to int16 for VAD
                 frame_int16 = (frame * 32768).astype(np.int16)
                 
-                # Check for speech
+                # Since client has pre-filtered audio, use VAD more liberally
+                frame_volume = np.max(np.abs(frame))
+                
+                # Check for speech with VAD (client has already done noise gating)
                 is_speech = self.vad.is_speech(frame_int16.tobytes(), self.sample_rate)
                 
                 if is_speech:
                     if not client["is_speaking"]:
-                        logger.info(f"Speech detected for {client_id}")
+                        logger.info(f"Speech detected for {client_id} (volume: {frame_volume:.4f})")
                     client["last_speech_time"] = time.time()
                     client["is_speaking"] = True
                     # Add frame to transcription buffer
                     client["transcription_buffer"].extend(frame)
+                elif frame_volume > 0.005:
+                    # Audio present but VAD says no speech - still add for context
+                    if len(client["transcription_buffer"]) > 0:
+                        client["transcription_buffer"].extend(frame[:len(frame)//4])  # Add some context
                 else:
                     # Check if silence duration exceeded
                     silence_time = time.time() - client["last_speech_time"]
@@ -283,10 +291,10 @@ async def main():
         model_size="large-v3",  # Use large model for best accuracy
         device="cuda",  # Use GPU
         compute_type="float16",  # Use float16 for faster inference on RTX 4070 Ti Super
-        vad_aggressiveness=2,  # Moderate VAD aggressiveness
+        vad_aggressiveness=1,  # Less aggressive for noisy environments
         sample_rate=16000,
         buffer_duration=0.5,
-        silence_duration=0.5
+        silence_duration=1.0  # Longer silence before triggering transcription
     )
     
     await server.start_server()
