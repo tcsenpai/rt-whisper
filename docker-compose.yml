@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  whisper-streaming:
+    build: .
+    image: whisper-streaming:latest
+    container_name: whisper-streaming-server
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./models:/app/models  # Persist downloaded models
+      - ./logs:/app/logs      # Optional: for logs
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - whisper-net
+
+networks:
+  whisper-net:
+    driver: bridge

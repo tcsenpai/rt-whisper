@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Transcription Client</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 800px;
+            width: 100%;
+            padding: 40px;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: 2em;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            flex: 1;
+            min-width: 120px;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+        
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+        
+        .btn-danger {
+            background: #ff6b6b;
+            color: white;
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
+        
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .status.connecting {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeeba;
+        }
+        
+        .transcript-container {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            min-height: 300px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        
+        .transcript-item {
+            margin-bottom: 15px;
+            padding: 12px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .transcript-text {
+            color: #333;
+            line-height: 1.5;
+        }
+        
+        .transcript-meta {
+            margin-top: 8px;
+            font-size: 0.85em;
+            color: #666;
+        }
+        
+        .language-select {
+            margin-bottom: 20px;
+        }
+        
+        select {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            background: white;
+        }
+        
+        .server-input {
+            margin-bottom: 20px;
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+        
+        .volume-meter {
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+        
+        .volume-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50 0%, #FFC107 70%, #FF5722 100%);
+            width: 0%;
+            transition: width 0.1s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Real-Time Transcription</h1>
+        
+        <div class="server-input">
+            <input type="text" id="serverUrl" placeholder="WebSocket Server URL" value="ws://localhost:8765">
+        </div>
+        
+        <div class="language-select">
+            <select id="languageSelect">
+                <option value="">Auto-detect Language</option>
+                <option value="en">English</option>
+                <option value="es">Spanish</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="it">Italian</option>
+                <option value="pt">Portuguese</option>
+                <option value="ru">Russian</option>
+                <option value="zh">Chinese</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+            </select>
+        </div>
+        
+        <div class="status disconnected" id="status">
+            Disconnected
+        </div>
+        
+        <div class="volume-meter">
+            <div class="volume-bar" id="volumeBar"></div>
+        </div>
+        
+        <div class="controls">
+            <button id="connectBtn" class="btn-primary">Connect</button>
+            <button id="startBtn" class="btn-primary" disabled>Start Recording</button>
+            <button id="stopBtn" class="btn-danger" disabled>Stop Recording</button>
+            <button id="clearBtn" class="btn-secondary">Clear Transcript</button>
+            <button id="downloadBtn" class="btn-secondary">Download Transcript</button>
+        </div>
+        
+        <div class="transcript-container" id="transcript">
+            <div style="color: #999; text-align: center; padding: 50px;">
+                Transcriptions will appear here...
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let ws = null;
+        let mediaRecorder = null;
+        let audioContext = null;
+        let audioProcessor = null;
+        let audioInput = null;
+        let isRecording = false;
+        let transcriptHistory = [];
+        
+        const connectBtn = document.getElementById('connectBtn');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const transcript = document.getElementById('transcript');
+        const status = document.getElementById('status');
+        const languageSelect = document.getElementById('languageSelect');
+        const serverUrl = document.getElementById('serverUrl');
+        const volumeBar = document.getElementById('volumeBar');
+        
+        // Connect to WebSocket server
+        connectBtn.addEventListener('click', () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                disconnect();
+            } else {
+                connect();
+            }
+        });
+        
+        function connect() {
+            const url = serverUrl.value || 'ws://localhost:8765';
+            
+            updateStatus('connecting', 'Connecting...');
+            
+            ws = new WebSocket(url);
+            
+            ws.onopen = () => {
+                updateStatus('connected', 'Connected');
+                connectBtn.textContent = 'Disconnect';
+                startBtn.disabled = false;
+                
+                // Set language if selected
+                if (languageSelect.value) {
+                    ws.send(JSON.stringify({
+                        command: 'set_language',
+                        language: languageSelect.value
+                    }));
+                }
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                
+                if (data.type === 'partial') {
+                    addTranscription(data);
+                } else if (data.type === 'full_transcript') {
+                    console.log('Full transcript:', data.text);
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                updateStatus('disconnected', 'Connection error');
+            };
+            
+            ws.onclose = () => {
+                updateStatus('disconnected', 'Disconnected');
+                connectBtn.textContent = 'Connect';
+                startBtn.disabled = true;
+                stopBtn.disabled = true;
+                if (isRecording) {
+                    stopRecording();
+                }
+            };
+        }
+        
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+        
+        // Start recording
+        startBtn.addEventListener('click', startRecording);
+        stopBtn.addEventListener('click', stopRecording);
+        
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 16000,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    } 
+                });
+                
+                // Create audio context for processing
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 16000
+                });
+                
+                audioInput = audioContext.createMediaStreamSource(stream);
+                audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+                
+                audioProcessor.onaudioprocess = (e) => {
+                    if (!isRecording) return;
+                    
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    
+                    // Calculate volume for visualization
+                    let sum = 0;
+                    for (let i = 0; i < inputData.length; i++) {
+                        sum += Math.abs(inputData[i]);
+                    }
+                    const volume = sum / inputData.length;
+                    volumeBar.style.width = Math.min(100, volume * 500) + '%';
+                    
+                    // Convert float32 to int16
+                    const int16Data = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        const s = Math.max(-1, Math.min(1, inputData[i]));
+                        int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    }
+                    
+                    // Send to server
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(int16Data.buffer);
+                    }
+                };
+                
+                audioInput.connect(audioProcessor);
+                audioProcessor.connect(audioContext.destination);
+                
+                isRecording = true;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                
+            } catch (error) {
+                console.error('Error accessing microphone:', error);
+                alert('Failed to access microphone. Please check permissions.');
+            }
+        }
+        
+        function stopRecording() {
+            isRecording = false;
+            
+            if (audioProcessor) {
+                audioProcessor.disconnect();
+                audioProcessor = null;
+            }
+            
+            if (audioInput) {
+                audioInput.disconnect();
+                audioInput = null;
+            }
+            
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            
+            volumeBar.style.width = '0%';
+            
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+        }
+        
+        // Language selection
+        languageSelect.addEventListener('change', () => {
+            if (ws && ws.readyState === WebSocket.OPEN && languageSelect.value) {
+                ws.send(JSON.stringify({
+                    command: 'set_language',
+                    language: languageSelect.value
+                }));
+            }
+        });
+        
+        // Clear transcript
+        clearBtn.addEventListener('click', () => {
+            transcript.innerHTML = '<div style="color: #999; text-align: center; padding: 50px;">Transcriptions will appear here...</div>';
+            transcriptHistory = [];
+            
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ command: 'clear_session' }));
+            }
+        });
+        
+        // Download transcript
+        downloadBtn.addEventListener('click', () => {
+            const text = transcriptHistory.map(t => t.text).join('\n');
+            const blob = new Blob([text], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `transcript_${new Date().toISOString()}.txt`;
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+        
+        function addTranscription(data) {
+            transcriptHistory.push(data);
+            
+            // Clear placeholder if present
+            if (transcript.querySelector('div[style*="color: #999"]')) {
+                transcript.innerHTML = '';
+            }
+            
+            const item = document.createElement('div');
+            item.className = 'transcript-item';
+            
+            const text = document.createElement('div');
+            text.className = 'transcript-text';
+            text.textContent = data.text;
+            
+            const meta = document.createElement('div');
+            meta.className = 'transcript-meta';
+            const time = new Date(data.timestamp * 1000).toLocaleTimeString();
+            meta.textContent = `${time} | Language: ${data.language} | Duration: ${data.duration.toFixed(2)}s`;
+            
+            item.appendChild(text);
+            item.appendChild(meta);
+            transcript.appendChild(item);
+            
+            // Auto-scroll to bottom
+            transcript.scrollTop = transcript.scrollHeight;
+        }
+        
+        function updateStatus(className, text) {
+            status.className = `status ${className}`;
+            status.textContent = text;
+        }
+    </script>
+</body>
+</html>

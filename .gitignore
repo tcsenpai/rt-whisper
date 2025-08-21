@@ -1,0 +1,6 @@
+__pycache__
+*.pyc
+*.pyz
+CLAUDE.md
+.claude/
+.vscode/
