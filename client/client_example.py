@@ -45,6 +45,7 @@ class StreamingClient:
         self.actual_sample_rate = sample_rate  # Will be updated based on device capabilities
         self.negotiated_sample_rate = None  # Will be set after negotiation with server
         self.resample_needed = False
+        self.awaiting_negotiation = False  # Flag for async negotiation
         
         # Adaptive noise gating
         self.noise_calibration = True
@@ -242,8 +243,8 @@ class StreamingClient:
         
         return (in_data, pyaudio.paContinue if self.running else pyaudio.paComplete)
     
-    async def negotiate_sample_rate(self, websocket):
-        """Negotiate sample rate with server"""
+    async def request_sample_rate_negotiation(self, websocket):
+        """Send sample rate negotiation request"""
         print(f"🔄 Negotiating sample rate ({self.actual_sample_rate} Hz)...")
         
         # Send negotiation request
@@ -252,29 +253,8 @@ class StreamingClient:
             "sample_rate": self.actual_sample_rate
         }))
         
-        # Wait for response
-        try:
-            response_data = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-            response = json.loads(response_data)
-            
-            if response.get("type") == "sample_rate_negotiated":
-                self.negotiated_sample_rate = response["agreed_rate"]
-                requested = response["requested_rate"]
-                agreed = response["agreed_rate"]
-                supported = response["supported_rates"]
-                
-                if agreed == requested:
-                    print(f"✅ Server accepted {agreed} Hz - no resampling needed!")
-                else:
-                    print(f"🔄 Server negotiated {requested} Hz → {agreed} Hz")
-                    print(f"   Supported rates: {supported}")
-                
-                return True
-                
-        except (asyncio.TimeoutError, json.JSONDecodeError, KeyError):
-            print("⚠️  Sample rate negotiation failed, defaulting to 16 kHz")
-            self.negotiated_sample_rate = 16000
-            return False
+        # Set flag to wait for response
+        self.awaiting_negotiation = True
     
     async def send_audio(self, websocket):
         """Send audio data to the server"""
@@ -288,8 +268,11 @@ class StreamingClient:
             default_device = self.audio.get_default_input_device_info()
             print(f"Using default audio device: {default_device['name']}")
         
-        # Negotiate sample rate with server first
-        await self.negotiate_sample_rate(websocket)
+        # Request sample rate negotiation (response handled in receive_transcriptions)
+        await self.request_sample_rate_negotiation(websocket)
+        
+        # Wait briefly for negotiation to complete
+        await asyncio.sleep(0.5)
         
         # Setup resampling if needed
         target_rate = self.negotiated_sample_rate or 16000
@@ -348,9 +331,25 @@ class StreamingClient:
             async for message in websocket:
                 data = json.loads(message)
                 
-                if data["type"] == "partial":
+                if data["type"] == "sample_rate_negotiated":
+                    # Handle sample rate negotiation response
+                    self.negotiated_sample_rate = data["agreed_rate"]
+                    requested = data["requested_rate"]
+                    agreed = data["agreed_rate"]
+                    supported = data["supported_rates"]
+                    
+                    if agreed == requested:
+                        print(f"✅ Server accepted {agreed} Hz - no resampling needed!")
+                    else:
+                        print(f"🔄 Server negotiated {requested} Hz → {agreed} Hz")
+                        print(f"   Supported rates: {supported}")
+                    
+                    self.awaiting_negotiation = False
+                
+                elif data["type"] == "partial":
                     # Real-time partial transcription
-                    print(f"\r[{data['language']}] {data['text']}", end="", flush=True)
+                    sample_rate_info = f" @{data.get('sample_rate', '?')}Hz" if 'sample_rate' in data else ""
+                    print(f"\r[{data['language']}]{sample_rate_info} {data['text']}", end="", flush=True)
                     print()  # New line after each transcription
                 
                 elif data["type"] == "full_transcript":
