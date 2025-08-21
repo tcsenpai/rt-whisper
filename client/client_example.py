@@ -13,6 +13,7 @@ import queue
 import argparse
 import sys
 from typing import Optional
+from scipy import signal
 
 class StreamingClient:
     def __init__(
@@ -40,6 +41,9 @@ class StreamingClient:
         self.audio = pyaudio.PyAudio()
         self.audio_queue = queue.Queue()
         self.running = False
+        self.actual_sample_rate = sample_rate  # Will be updated based on device capabilities
+        self.target_sample_rate = 16000  # Server expects this
+        self.resample_needed = False
         
         # Find and display available audio devices
         self.list_audio_devices()
@@ -57,13 +61,46 @@ class StreamingClient:
         print("-" * 50)
         return devices
     
+    def test_sample_rate(self, device_index, sample_rate):
+        """Test if a device supports a specific sample rate"""
+        try:
+            # Just test if we can create the stream
+            test_stream = self.audio.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=sample_rate,
+                input=True,
+                input_device_index=device_index,
+                frames_per_buffer=1024
+            )
+            test_stream.close()
+            return True
+        except OSError:
+            return False
+    
+    def find_best_sample_rate(self, device_index):
+        """Find the best supported sample rate for a device"""
+        # Try sample rates in order of preference
+        rates_to_try = [16000, 44100, 48000, 22050, 8000]
+        
+        for rate in rates_to_try:
+            if self.test_sample_rate(device_index, rate):
+                return rate
+        
+        # If none work, get the device's default
+        try:
+            device_info = self.audio.get_device_info_by_index(device_index)
+            return int(device_info['defaultSampleRate'])
+        except:
+            return 44100  # Last resort
+    
     def select_audio_device(self):
         """Interactive device selection"""
         devices = self.list_audio_devices()
         
         if not devices:
             print("No audio input devices found!")
-            return None
+            return None, None
         
         # Get default device
         try:
@@ -78,20 +115,47 @@ class StreamingClient:
         try:
             choice = input().strip()
             if choice == "":
-                return default_index
+                device_index = default_index
+            else:
+                device_id = int(choice)
+                # Verify it's a valid input device
+                device_index = None
+                for dev_id, info in devices:
+                    if dev_id == device_id:
+                        device_index = device_id
+                        break
+                
+                if device_index is None:
+                    print(f"Invalid device number. Using default device {default_index}")
+                    device_index = default_index
             
-            device_id = int(choice)
-            # Verify it's a valid input device
-            for dev_id, info in devices:
-                if dev_id == device_id:
-                    return device_id
+            # Find best sample rate for this device
+            best_rate = self.find_best_sample_rate(device_index)
+            print(f"Best sample rate for this device: {best_rate} Hz")
             
-            print(f"Invalid device number. Using default device {default_index}")
-            return default_index
+            return device_index, best_rate
             
         except (ValueError, KeyboardInterrupt):
             print(f"\nUsing default device {default_index}")
-            return default_index
+            best_rate = self.find_best_sample_rate(default_index)
+            print(f"Best sample rate for this device: {best_rate} Hz")
+            return default_index, best_rate
+    
+    def resample_audio(self, audio_data):
+        """Resample audio to target sample rate if needed"""
+        if not self.resample_needed:
+            return audio_data
+        
+        # Convert bytes to numpy array
+        audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+        
+        # Resample
+        num_samples_target = int(len(audio_array) * self.target_sample_rate / self.actual_sample_rate)
+        resampled = signal.resample(audio_array, num_samples_target)
+        
+        # Convert back to int16 bytes
+        resampled_int16 = resampled.astype(np.int16)
+        return resampled_int16.tobytes()
     
     def audio_callback(self, in_data, frame_count, time_info, status):
         """Callback for audio stream"""
@@ -105,8 +169,11 @@ class StreamingClient:
             bars = min(50, int(max_amp/500))
             print(f"\rAudio level: {'█' * bars}{' ' * (50-bars)} [{max_amp:5d}]", end="", flush=True)
         
+        # Resample if needed
+        processed_data = self.resample_audio(in_data)
+        
         # Add audio data to queue
-        self.audio_queue.put(in_data)
+        self.audio_queue.put(processed_data)
         
         return (in_data, pyaudio.paContinue if self.running else pyaudio.paComplete)
     
@@ -122,14 +189,25 @@ class StreamingClient:
             default_device = self.audio.get_default_input_device_info()
             print(f"Using default audio device: {default_device['name']}")
         
+        # Setup resampling if needed
+        if self.actual_sample_rate != self.target_sample_rate:
+            self.resample_needed = True
+            print(f"Will resample from {self.actual_sample_rate} Hz to {self.target_sample_rate} Hz")
+        else:
+            self.resample_needed = False
+            print("No resampling needed")
+        
+        # Calculate chunk size based on actual sample rate
+        actual_chunk_size = int(self.actual_sample_rate * 0.1)  # 100ms chunks
+        
         # Open audio stream
         stream = self.audio.open(
             format=pyaudio.paInt16,
             channels=1,
-            rate=self.sample_rate,
+            rate=self.actual_sample_rate,  # Use actual device sample rate
             input=True,
             input_device_index=self.device_index,
-            frames_per_buffer=self.chunk_size,
+            frames_per_buffer=actual_chunk_size,
             stream_callback=self.audio_callback
         )
         
@@ -309,7 +387,9 @@ async def main():
     
     # If no device specified, let user select one
     if args.device is None:
-        client.device_index = client.select_audio_device()
+        device_index, sample_rate = client.select_audio_device()
+        client.device_index = device_index
+        client.actual_sample_rate = sample_rate
         print()
     
     await client.run()
