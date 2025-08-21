@@ -43,7 +43,7 @@ class StreamingClient:
         self.audio_queue = queue.Queue()
         self.running = False
         self.actual_sample_rate = sample_rate  # Will be updated based on device capabilities
-        self.target_sample_rate = 16000  # Server expects this
+        self.negotiated_sample_rate = None  # Will be set after negotiation with server
         self.resample_needed = False
         
         # Adaptive noise gating
@@ -157,8 +157,9 @@ class StreamingClient:
         # Convert bytes to numpy array
         audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
         
-        # Resample
-        num_samples_target = int(len(audio_array) * self.target_sample_rate / self.actual_sample_rate)
+        # Resample to negotiated rate
+        target_rate = self.negotiated_sample_rate or 16000
+        num_samples_target = int(len(audio_array) * target_rate / self.actual_sample_rate)
         resampled = signal.resample(audio_array, num_samples_target)
         
         # Convert back to int16 bytes
@@ -202,7 +203,13 @@ class StreamingClient:
         if self.noise_calibration:
             return False  # Don't send during calibration
             
+        # Convert to normalized float (-1.0 to 1.0 range)
         max_amp = np.max(np.abs(audio_array.astype(np.float32) / 32768.0))
+        
+        # Debug: show comparison
+        if max_amp > self.noise_floor * 0.5:  # Show when we're getting close
+            print(f"\rAudio check: {max_amp:.4f} vs threshold {self.noise_floor:.4f} {'✓ SEND' if max_amp > self.noise_floor else '✗ block'}", end="", flush=True)
+        
         return max_amp > self.noise_floor
 
     def audio_callback(self, in_data, frame_count, time_info, status):
@@ -217,12 +224,15 @@ class StreamingClient:
         self.update_noise_floor(audio_array)
         
         # Show audio levels during calibration or when above threshold
-        max_amp = np.max(np.abs(audio_array))
-        if self.noise_calibration or max_amp > (self.noise_floor * 32768 * 0.8):
-            bars = min(50, int(max_amp/500))
+        max_amp_int16 = np.max(np.abs(audio_array))  # Raw int16 values
+        max_amp_float = max_amp_int16 / 32768.0       # Normalized float
+        
+        if self.noise_calibration or max_amp_float > (self.noise_floor * 0.8):
+            bars = min(50, int(max_amp_int16/500))
             threshold_marker = int((self.noise_floor * 32768) / 500) if not self.noise_calibration else 0
             bar_display = '█' * bars + '│' if bars > threshold_marker else '█' * bars
-            print(f"\rAudio: {bar_display}{' ' * (50-bars)} [{max_amp:5d}] {'(calibrating)' if self.noise_calibration else ''}", end="", flush=True)
+            status = '(calibrating)' if self.noise_calibration else f'(threshold: {self.noise_floor:.4f})'
+            print(f"\rAudio: {bar_display}{' ' * (50-bars)} [{max_amp_int16:5d}] {status}", end="", flush=True)
         
         # Only queue audio if it should be sent
         if self.should_send_audio(audio_array):
@@ -231,6 +241,40 @@ class StreamingClient:
             self.audio_queue.put(processed_data)
         
         return (in_data, pyaudio.paContinue if self.running else pyaudio.paComplete)
+    
+    async def negotiate_sample_rate(self, websocket):
+        """Negotiate sample rate with server"""
+        print(f"🔄 Negotiating sample rate ({self.actual_sample_rate} Hz)...")
+        
+        # Send negotiation request
+        await websocket.send(json.dumps({
+            "command": "negotiate_sample_rate",
+            "sample_rate": self.actual_sample_rate
+        }))
+        
+        # Wait for response
+        try:
+            response_data = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+            response = json.loads(response_data)
+            
+            if response.get("type") == "sample_rate_negotiated":
+                self.negotiated_sample_rate = response["agreed_rate"]
+                requested = response["requested_rate"]
+                agreed = response["agreed_rate"]
+                supported = response["supported_rates"]
+                
+                if agreed == requested:
+                    print(f"✅ Server accepted {agreed} Hz - no resampling needed!")
+                else:
+                    print(f"🔄 Server negotiated {requested} Hz → {agreed} Hz")
+                    print(f"   Supported rates: {supported}")
+                
+                return True
+                
+        except (asyncio.TimeoutError, json.JSONDecodeError, KeyError):
+            print("⚠️  Sample rate negotiation failed, defaulting to 16 kHz")
+            self.negotiated_sample_rate = 16000
+            return False
     
     async def send_audio(self, websocket):
         """Send audio data to the server"""
@@ -244,13 +288,17 @@ class StreamingClient:
             default_device = self.audio.get_default_input_device_info()
             print(f"Using default audio device: {default_device['name']}")
         
+        # Negotiate sample rate with server first
+        await self.negotiate_sample_rate(websocket)
+        
         # Setup resampling if needed
-        if self.actual_sample_rate != self.target_sample_rate:
+        target_rate = self.negotiated_sample_rate or 16000
+        if self.actual_sample_rate != target_rate:
             self.resample_needed = True
-            print(f"Will resample from {self.actual_sample_rate} Hz to {self.target_sample_rate} Hz")
+            print(f"Will resample from {self.actual_sample_rate} Hz to {target_rate} Hz")
         else:
             self.resample_needed = False
-            print("No resampling needed")
+            print(f"No resampling needed - using native {self.actual_sample_rate} Hz")
         
         # Calculate chunk size based on actual sample rate
         actual_chunk_size = int(self.actual_sample_rate * 0.1)  # 100ms chunks
@@ -323,6 +371,8 @@ class StreamingClient:
         print("  'lang <code>' - Set language (e.g., 'lang en' for English)")
         print("  'full' - Get full session transcript")
         print("  'clear' - Clear session")
+        print("  'recalibrate' - Recalibrate noise floor")
+        print("  'threshold <value>' - Set noise threshold manually (e.g., 'threshold 0.01')")
         print("  'quit' - Exit")
         print()
         
@@ -340,6 +390,18 @@ class StreamingClient:
                     await websocket.send(json.dumps({"command": "get_full_transcript"}))
                 elif command.lower() == "clear":
                     await websocket.send(json.dumps({"command": "clear_session"}))
+                elif command.lower() == "recalibrate":
+                    print("Restarting noise calibration...")
+                    self.noise_calibration = True
+                    self.noise_samples = []
+                    self.calibration_start_time = None
+                elif command.lower().startswith("threshold "):
+                    try:
+                        threshold = float(command.split()[1])
+                        self.noise_floor = threshold
+                        print(f"Noise threshold manually set to: {threshold:.4f}")
+                    except (ValueError, IndexError):
+                        print("Invalid threshold value. Use: threshold 0.01")
                 elif command.lower().startswith("lang "):
                     language = command.split()[1]
                     await websocket.send(json.dumps({

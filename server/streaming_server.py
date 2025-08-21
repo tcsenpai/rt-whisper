@@ -32,7 +32,7 @@ class TranscriptionServer:
         device: str = "cuda",
         compute_type: str = "float16",
         vad_aggressiveness: int = 1,  # Less aggressive for noisy environments
-        sample_rate: int = 16000,
+        supported_sample_rates: list = None,  # Will support multiple rates
         buffer_duration: float = 0.5,  # Buffer duration in seconds
         silence_duration: float = 1.0,  # Silence duration to trigger transcription
     ):
@@ -44,15 +44,21 @@ class TranscriptionServer:
             device: Device to run the model on (cuda for GPU)
             compute_type: Computation type (float16 for faster inference)
             vad_aggressiveness: Voice Activity Detection aggressiveness (0-3)
-            sample_rate: Audio sample rate in Hz
+            supported_sample_rates: List of supported sample rates (defaults to common rates)
             buffer_duration: Duration of audio buffer in seconds
             silence_duration: Duration of silence before processing buffered audio
         """
-        self.sample_rate = sample_rate
+        # Support common high-quality sample rates
+        if supported_sample_rates is None:
+            self.supported_sample_rates = [48000, 44100, 32000, 24000, 22050, 16000, 8000]
+        else:
+            self.supported_sample_rates = supported_sample_rates
+            
+        logger.info(f"Server supports sample rates: {self.supported_sample_rates}")
+        
         self.buffer_duration = buffer_duration
         self.silence_duration = silence_duration
         self.frame_duration_ms = 30  # VAD frame duration in milliseconds
-        self.frame_size = int(sample_rate * self.frame_duration_ms / 1000)
         
         # Check CUDA availability
         if device == "cuda" and not torch.cuda.is_available():
@@ -93,7 +99,9 @@ class TranscriptionServer:
             "last_speech_time": time.time(),
             "is_speaking": False,
             "language": None,  # Auto-detect language
-            "session_text": []  # Keep track of full session transcription
+            "session_text": [],  # Keep track of full session transcription
+            "sample_rate": 16000,  # Default, will be updated via negotiation
+            "frame_size": int(16000 * self.frame_duration_ms / 1000)  # Will be updated
         }
         
         try:
@@ -123,6 +131,30 @@ class TranscriptionServer:
             if command == "set_language":
                 self.connections[client_id]["language"] = data.get("language")
                 logger.info(f"Language set to {data.get('language')} for {client_id}")
+                
+            elif command == "negotiate_sample_rate":
+                requested_rate = data.get("sample_rate", 16000)
+                # Find the best supported rate
+                if requested_rate in self.supported_sample_rates:
+                    agreed_rate = requested_rate
+                else:
+                    # Find closest supported rate
+                    agreed_rate = min(self.supported_sample_rates, key=lambda x: abs(x - requested_rate))
+                
+                # Update client state
+                self.connections[client_id]["sample_rate"] = agreed_rate
+                self.connections[client_id]["frame_size"] = int(agreed_rate * self.frame_duration_ms / 1000)
+                
+                logger.info(f"Sample rate negotiated for {client_id}: {requested_rate} -> {agreed_rate}")
+                
+                # Send response back to client
+                await self.send_transcription(client_id, {
+                    "type": "sample_rate_negotiated",
+                    "requested_rate": requested_rate,
+                    "agreed_rate": agreed_rate,
+                    "supported_rates": self.supported_sample_rates,
+                    "timestamp": time.time()
+                })
                 
             elif command == "get_full_transcript":
                 # Send the full session transcript
@@ -156,7 +188,8 @@ class TranscriptionServer:
             client["audio_buffer"].extend(audio_array)
             
             # Check if we have enough audio for VAD
-            frame_size = self.frame_size
+            frame_size = client["frame_size"]  # Use client-specific frame size
+            client_sample_rate = client["sample_rate"]  # Use client-specific sample rate
             
             while len(client["audio_buffer"]) >= frame_size:
                 # Extract frame for VAD
@@ -169,7 +202,7 @@ class TranscriptionServer:
                 frame_volume = np.max(np.abs(frame))
                 
                 # Check for speech with VAD (client has already done noise gating)
-                is_speech = self.vad.is_speech(frame_int16.tobytes(), self.sample_rate)
+                is_speech = self.vad.is_speech(frame_int16.tobytes(), client_sample_rate)
                 
                 if is_speech:
                     if not client["is_speaking"]:
@@ -219,12 +252,14 @@ class TranscriptionServer:
             # Convert buffer to numpy array
             audio_array = np.array(client["transcription_buffer"])
             
+            client_sample_rate = client["sample_rate"]
+            
             # Skip if audio is too short
-            if len(audio_array) < self.sample_rate * 0.1:  # Less than 100ms
+            if len(audio_array) < client_sample_rate * 0.1:  # Less than 100ms
                 client["transcription_buffer"] = []
                 return
             
-            # Transcribe audio
+            # Transcribe audio (Whisper handles different sample rates automatically)
             segments, info = self.model.transcribe(
                 audio_array,
                 beam_size=5,
@@ -234,7 +269,7 @@ class TranscriptionServer:
                 vad_parameters=dict(
                     min_silence_duration_ms=500,
                     speech_pad_ms=400,
-                    window_size_samples=1024,
+                    window_size_samples=int(1024 * client_sample_rate / 16000),  # Scale for sample rate
                     threshold=0.5
                 )
             )
@@ -254,7 +289,8 @@ class TranscriptionServer:
                     "text": transcription.strip(),
                     "language": info.language,
                     "timestamp": time.time(),
-                    "duration": len(audio_array) / self.sample_rate
+                    "duration": len(audio_array) / client_sample_rate,
+                    "sample_rate": client_sample_rate
                 })
                 
                 logger.info(f"Transcribed for {client_id}: {transcription.strip()}")
@@ -292,7 +328,7 @@ async def main():
         device="cuda",  # Use GPU
         compute_type="float16",  # Use float16 for faster inference on RTX 4070 Ti Super
         vad_aggressiveness=1,  # Less aggressive for noisy environments
-        sample_rate=16000,
+        supported_sample_rates=[48000, 44100, 32000, 24000, 22050, 16000, 8000],  # High quality first
         buffer_duration=0.5,
         silence_duration=1.0  # Longer silence before triggering transcription
     )
