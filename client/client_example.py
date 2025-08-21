@@ -48,16 +48,62 @@ class StreamingClient:
         """List available audio input devices"""
         print("\nAvailable audio input devices:")
         print("-" * 50)
+        devices = []
         for i in range(self.audio.get_device_count()):
             info = self.audio.get_device_info_by_index(i)
             if info['maxInputChannels'] > 0:
+                devices.append((i, info))
                 print(f"Device {i}: {info['name']} (Channels: {info['maxInputChannels']})")
         print("-" * 50)
+        return devices
+    
+    def select_audio_device(self):
+        """Interactive device selection"""
+        devices = self.list_audio_devices()
+        
+        if not devices:
+            print("No audio input devices found!")
+            return None
+        
+        # Get default device
+        try:
+            default_info = self.audio.get_default_input_device_info()
+            default_index = default_info['index']
+        except:
+            default_index = devices[0][0]
+        
+        print(f"\nDefault device is: {default_index}")
+        print("Enter device number to use (or press Enter for default): ", end="")
+        
+        try:
+            choice = input().strip()
+            if choice == "":
+                return default_index
+            
+            device_id = int(choice)
+            # Verify it's a valid input device
+            for dev_id, info in devices:
+                if dev_id == device_id:
+                    return device_id
+            
+            print(f"Invalid device number. Using default device {default_index}")
+            return default_index
+            
+        except (ValueError, KeyboardInterrupt):
+            print(f"\nUsing default device {default_index}")
+            return default_index
     
     def audio_callback(self, in_data, frame_count, time_info, status):
         """Callback for audio stream"""
         if status:
             print(f"Audio callback status: {status}")
+        
+        # Debug: Check if we're getting actual audio
+        audio_array = np.frombuffer(in_data, dtype=np.int16)
+        max_amp = np.max(np.abs(audio_array))
+        if max_amp > 100:  # Only show if there's actual sound
+            bars = min(50, int(max_amp/500))
+            print(f"\rAudio level: {'█' * bars}{' ' * (50-bars)} [{max_amp:5d}]", end="", flush=True)
         
         # Add audio data to queue
         self.audio_queue.put(in_data)
@@ -67,6 +113,14 @@ class StreamingClient:
     async def send_audio(self, websocket):
         """Send audio data to the server"""
         print("Starting audio streaming...")
+        
+        # Show which device we're using
+        if self.device_index is not None:
+            device_info = self.audio.get_device_info_by_index(self.device_index)
+            print(f"Using audio device {self.device_index}: {device_info['name']}")
+        else:
+            default_device = self.audio.get_default_input_device_info()
+            print(f"Using default audio device: {default_device['name']}")
         
         # Open audio stream
         stream = self.audio.open(
@@ -246,12 +300,17 @@ async def main():
         audio.terminate()
         return
     
-    # Create and run client
+    # Create client
     client = StreamingClient(
         server_url=args.server,
         sample_rate=args.sample_rate,
         device_index=args.device
     )
+    
+    # If no device specified, let user select one
+    if args.device is None:
+        client.device_index = client.select_audio_device()
+        print()
     
     await client.run()
 
