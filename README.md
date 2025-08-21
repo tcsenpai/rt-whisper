@@ -1,6 +1,74 @@
 # Real-Time Whisper Streaming Transcription Service
 
-A high-performance real-time transcription service using faster-whisper, optimized for NVIDIA RTX 4070 Ti Super GPU. Receives audio streams via WebSocket and returns transcripts in real-time.
+A high-performance real-time transcription service using faster-whisper, optimized for NVIDIA RTX 4070 Ti Super GPU. This project consists of a **server** component that runs on a GPU-equipped machine and **client** components that can run on any machine to send audio for transcription.
+
+## 📁 Project Structure
+
+```
+rtwhisper/
+├── server/         # Run this on the GPU machine (RTX 4070 Ti Super)
+│   ├── streaming_server.py     # Main WebSocket server
+│   ├── requirements.txt        # Server dependencies
+│   ├── Dockerfile             # Docker setup (optional)
+│   └── README.md              # Server-specific instructions
+│
+├── client/         # Run this on any client machine
+│   ├── client_example.py      # Python client for microphone streaming
+│   ├── web_client.html        # Web-based client (runs in browser)
+│   ├── requirements.txt       # Client dependencies
+│   └── README.md              # Client-specific instructions
+│
+└── README.md       # This file - overview and quick start
+```
+
+## 🚀 Quick Start
+
+### On the Server Machine (with RTX 4070 Ti Super)
+
+1. Navigate to the server directory:
+```bash
+cd rtwhisper/server
+```
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3. Run the server:
+```bash
+python3 streaming_server.py
+```
+
+4. Note your server's IP address:
+```bash
+hostname -I  # On Linux
+ipconfig     # On Windows
+```
+
+### On the Client Machine(s)
+
+1. Navigate to the client directory:
+```bash
+cd rtwhisper/client
+```
+
+2. For Python client:
+```bash
+pip install -r requirements.txt
+python3 client_example.py --server ws://SERVER_IP:8765
+```
+
+3. For Web client:
+   - Simply open `web_client.html` in a web browser
+   - Enter the server URL: `ws://SERVER_IP:8765`
+   - Click Connect
+
+## 🔧 Network Setup
+
+- **Server**: Runs on port 8765 by default
+- **Firewall**: Ensure port 8765 is open on the server machine
+- **Network**: Server and clients must be on the same network (or have route to each other)
 
 ## Features
 

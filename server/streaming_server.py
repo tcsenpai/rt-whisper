@@ -264,8 +264,11 @@ class TranscriptionServer:
     async def start_server(self, host: str = "0.0.0.0", port: int = 8765):
         """Start the WebSocket server"""
         logger.info(f"Starting WebSocket server on {host}:{port}")
+        logger.info("Server will be accessible from any network interface")
+        logger.info("Make sure port 8765 is open in your firewall")
         async with websockets.serve(self.handle_connection, host, port):
             logger.info(f"Server listening on ws://{host}:{port}")
+            logger.info(f"Clients can connect using ws://YOUR_SERVER_IP:8765")
             await asyncio.Future()  # Run forever
 
 async def main():
